@@ -1,0 +1,31 @@
+xv6 Large File System (Lab 3 - Task 1)
+
+This repository contains the solution for extending the xv6 file system to support large files (up to ~64MB) using doubly-indirect blocks.
+
+Overview
+
+By default, xv6 limits files to 268 blocks (12 direct, 1 singly-indirect). This project modifies the inode structure to support:
+
+11 Direct blocks
+
+1 Singly-indirect block
+
+1 Doubly-indirect block
+
+This increases the maximum file size to 65,803 blocks (11 + 256 + 256^2).
+
+Repository Structure
+
+headers_setup.md: Contains the mandatory changes to param.h, fs.h, and file.h.
+
+fs_variations.md: Contains 10 different variations of implementing the bmap() and itrunc() logic in fs.c. These range from standard academic implementations to highly optimized bitwise versions.
+
+How to use
+
+Apply the header changes to your local xv6 source code.
+
+Choose ONE of the 10 variations from fs_variations.md and replace the bmap() and itrunc() functions in your kernel/fs.c.
+
+Add $U/_bigfile\ to your Makefile under UPROGS.
+
+Run make clean && make qemu and test using the bigfile user command.

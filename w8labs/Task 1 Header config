@@ -1,0 +1,60 @@
+Header Configurations
+
+Before modifying fs.c, you must update the following three header files to change the file system size and the physical/in-memory structures of the inode.
+
+1. kernel/param.h
+
+Increase the maximum file system size.
+
+// Change FSSIZE from 2000 to 200000 to accommodate the large file test
+#define FSSIZE       200000  // size of file system in blocks
+
+
+2. kernel/fs.h
+
+Modify the physical on-disk inode (dinode) and the block limits.
+
+// 1. Change NDIRECT to 11
+#define NDIRECT 11
+
+// 2. Define NINDIRECT and the new NDINDIRECT (256 * 256)
+#define NINDIRECT (BSIZE / sizeof(uint))
+#define NDINDIRECT (NINDIRECT * NINDIRECT)
+
+// 3. Update MAXFILE to include the doubly-indirect blocks
+#define MAXFILE (NDIRECT + NINDIRECT + NDINDIRECT)
+
+// On-disk inode structure
+struct dinode {
+  short type;           // File type
+  short major;          // Major device number (T_DEVICE only)
+  short minor;          // Minor device number (T_DEVICE only)
+  short nlink;          // Number of links to inode in file system
+  uint size;            // Size of file (bytes)
+  
+  // 4. Update the addrs array size to include the doubly-indirect slot
+  uint addrs[NDIRECT+2];   // Data block addresses
+};
+
+
+3. kernel/file.h
+
+Modify the in-memory inode structure to match the disk layout.
+
+// in-memory copy of an inode
+struct inode {
+  uint dev;           // Device number
+  uint inum;          // Inode number
+  int ref;            // Reference count
+  struct sleeplock lock; // protects everything below here
+  int valid;          // inode has been read from disk?
+
+  short type;         // copy of disk inode
+  short major;
+  short minor;
+  short nlink;
+  uint size;
+  
+  // Update the addrs array size here as well
+  uint addrs[NDIRECT+2];
+};

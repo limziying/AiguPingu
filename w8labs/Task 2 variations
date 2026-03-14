@@ -1,0 +1,257 @@
+10 Common Exam / Test Tweaks for xv6 Symbolic Links (Task 2)
+
+In practical lab exams for xv6, professors often modify the requirements for the symlink system call and sys_open traversal to test edge cases, security, and performance.
+
+Here are 10 common exam variations for Task 2, complete with the implementation logic for each.
+
+Tweak 1: Strict One-Hop Limit (No Chaining)
+
+The Trap: The professor disables the while loop and explicitly forbids chained symlinks. A symlink can only point to a real file.
+Setup: Modify sys_open to use an if statement instead of a while loop, and reject the target if it is also a symlink.
+
+// sys_open() tweak
+if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+    // Read the target path
+    readi(ip, 0, (uint64)path, 0, ip->size);
+    path[ip->size] = '\0';
+    
+    iunlockput(ip);
+    if((ip = namei(path)) == 0){
+        end_op();
+        return -1;
+    }
+    ilock(ip);
+    
+    // TWEAK: Reject if the target is ALSO a symlink (No chaining)
+    if(ip->type == T_SYMLINK){
+        iunlockput(ip);
+        end_op();
+        return -1; 
+    }
+}
+
+
+Tweak 2: "Fast Symlinks" (In-Inode Storage)
+
+The Trap: To save disk space, paths shorter than 52 bytes (13 slots * 4 bytes) must be stored directly inside the inode->addrs array instead of allocating a data block with writei().
+Setup: Modify both sys_symlink and sys_open.
+
+// sys_symlink() tweak
+if(strlen(target) < sizeof(ip->addrs)) {
+    // TWEAK: Store string directly in the pointer array! No balloc needed.
+    memmove(ip->addrs, target, strlen(target));
+    ip->size = strlen(target);
+    iupdate(ip);
+} else {
+    // ... normal writei logic for long paths ...
+}
+
+// sys_open() tweak
+if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+    if(ip->size < sizeof(ip->addrs)) {
+        // TWEAK: Read directly from the inode's addrs array
+        memmove(path, ip->addrs, ip->size);
+        path[ip->size] = '\0';
+    } else {
+        readi(ip, 0, (uint64)path, 0, ip->size);
+    }
+    // ... namei(path) ...
+}
+
+
+Tweak 3: Strict Same-Directory Symlinks
+
+The Trap: The professor wants to prevent symlinks from pointing outside their current directory to avoid absolute path security risks.
+Setup: In sys_symlink, reject any target string that contains a / character.
+
+// sys_symlink() tweak
+int i;
+for(i = 0; target[i] != '\0'; i++){
+    if(target[i] == '/') {
+        // TWEAK: Refuse creation if target contains a slash
+        end_op();
+        return -1; 
+    }
+}
+
+// Proceed to create inode...
+ip = create(path, T_SYMLINK, 0, 0);
+
+
+Tweak 4: Array-Based Cycle Detection (True Cycles)
+
+The Trap: Instead of a lazy counter (e.g., depth < 10), you must detect actual cycles by tracking the inum of every symlink you visit.
+Setup: Create an array in sys_open to track visited inodes.
+
+// sys_open() tweak
+uint visited[10];
+int depth = 0;
+
+while(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+    // TWEAK: Check if we have seen this exact inode before
+    for(int i = 0; i < depth; i++){
+        if(visited[i] == ip->inum){
+            iunlockput(ip);
+            end_op();
+            return -1; // Cycle detected!
+        }
+    }
+    
+    if(depth >= 10) { iunlockput(ip); end_op(); return -1; }
+    
+    visited[depth++] = ip->inum; // Add to visited list
+    
+    readi(ip, 0, (uint64)path, 0, ip->size);
+    // ... iunlockput, namei, ilock ...
+}
+
+
+Tweak 5: Opt-In Follow (O_FOLLOW)
+
+The Trap: The default behavior in standard xv6 task is to follow links unless O_NOFOLLOW is passed. The tweak reverses this: open the link itself unless O_FOLLOW is explicitly provided.
+Setup: Define O_FOLLOW 0x800 in fcntl.h and invert the check in sys_open.
+
+// sys_open() tweak
+// TWEAK: Notice we check IF O_FOLLOW is set, rather than if NOFOLLOW is missing
+while(ip->type == T_SYMLINK && (omode & O_FOLLOW)){
+    int read_bytes = readi(ip, 0, (uint64)path, 0, ip->size);
+    path[read_bytes] = '\0';
+    
+    iunlockput(ip);
+    if((ip = namei(path)) == 0){
+        end_op();
+        return -1;
+    }
+    ilock(ip);
+    // ...
+}
+
+
+Tweak 6: The readlink System Call
+
+The Trap: The lab requires you to not only follow links, but also implement readlink() to allow user programs to see where a link points.
+Setup: Create a brand new system call sys_readlink in sysfile.c.
+
+// New syscall implementation
+uint64 sys_readlink(void) {
+    char path[MAXPATH];
+    uint64 ubuf;
+    size_t len;
+    struct inode *ip;
+
+    if(argstr(0, path, MAXPATH) < 0 || argaddr(1, &ubuf) < 0 || argint(2, (int*)&len) < 0)
+        return -1;
+
+    begin_op();
+    if((ip = namei(path)) == 0){ end_op(); return -1; }
+    ilock(ip);
+
+    if(ip->type != T_SYMLINK) {
+        iunlockput(ip);
+        end_op();
+        return -1; // Not a symlink!
+    }
+
+    int read_len = ip->size < len ? ip->size : len;
+    readi(ip, 0, (uint64)path, 0, read_len);
+    
+    iunlockput(ip);
+    end_op();
+
+    if(copyout(myproc()->pagetable, ubuf, path, read_len) < 0)
+        return -1;
+
+    return read_len;
+}
+
+
+Tweak 7: No Symlinks to Directories
+
+The Trap: To prevent infinite directory tree loops (which confuse ls and find), the professor forbids opening a symlink if its final destination is a directory.
+Setup: Add a check in sys_open after the while loop completes.
+
+// sys_open() tweak
+// ... inside sys_open, after the while loop finishes following links ...
+
+if(ip->type == T_DIR && omode != O_RDONLY){
+    iunlockput(ip);
+    end_op();
+    return -1;
+}
+
+// TWEAK: Check if the original path was a symlink, and if we landed on a directory
+// (Requires a flag 'was_symlink' to be set inside the while loop)
+if(was_symlink && ip->type == T_DIR) {
+    iunlockput(ip);
+    end_op();
+    return -1; // Refuse to open symlinks that resolve to directories
+}
+
+
+Tweak 8: Cumulative Path Length Limit
+
+The Trap: A depth of 10 is easily bypassed if each symlink target is huge. You must enforce that the total combined characters read across all traversed links does not exceed MAXPATH (128).
+Setup: Track total string length inside the sys_open while loop.
+
+// sys_open() tweak
+int total_traversed_chars = 0;
+
+while(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+    total_traversed_chars += ip->size;
+    
+    // TWEAK: Stop if the total string length exceeds standard MAXPATH
+    if(total_traversed_chars > MAXPATH) {
+        iunlockput(ip);
+        end_op();
+        return -1;
+    }
+    
+    readi(ip, 0, (uint64)path, 0, ip->size);
+    path[ip->size] = '\0';
+    // ...
+}
+
+
+Tweak 9: Custom Error Code for Dangling Links
+
+The Trap: If open() fails, standard xv6 returns -1. The test script might look for a specific -2 return code to differentiate "file doesn't exist" from "dangling symlink".
+Setup: Adjust the namei failure block inside the while loop.
+
+// sys_open() tweak
+while(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+    readi(ip, 0, (uint64)path, 0, ip->size);
+    path[ip->size] = '\0';
+    
+    iunlockput(ip);
+    
+    if((ip = namei(path)) == 0){
+        end_op();
+        // TWEAK: Return -2 specifically for broken/dangling symlinks
+        return -2; 
+    }
+    ilock(ip);
+}
+
+
+Tweak 10: Enforced Single-Block Target Limitation
+
+The Trap: The professor enforces that a symlink string must never span more than one direct block.
+Setup: Check the target length against BSIZE inside sys_symlink before doing anything.
+
+// sys_symlink() tweak
+// TWEAK: Ensure the path easily fits into a single disk block
+if(strlen(target) >= BSIZE) {
+    return -1; 
+}
+
+begin_op();
+ip = create(path, T_SYMLINK, 0, 0);
+if(ip == 0){
+    end_op();
+    return -1;
+}
+
+// Safe to writei() knowing it will only consume addrs[0]
+if(writei(ip, 0, (uint64)target, 0, strlen(target)) != strlen(target)) {
+    // error handling
+}

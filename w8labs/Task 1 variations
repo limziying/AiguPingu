@@ -1,0 +1,252 @@
+10 Common Exam / Test Tweaks for xv6 File System
+
+In a practical lab exam, professors rarely ask for the exact textbook doubly-indirect implementation. Instead, they tweak the inode structure to test your fundamental understanding of block math and pointer traversal.
+
+Here are 10 common variations you might see in an exam, complete with the bmap and itrunc logic for each.
+
+Tweak 1: Two Singly-Indirect Blocks
+
+The Trap: Instead of a doubly-indirect block, the professor asks for two singly-indirect blocks.
+Setup: NDIRECT = 11. addrs[11] is Singly 1. addrs[12] is Singly 2. Max blocks = $11 + 256 + 256 = 523$.
+
+// bmap() tweak
+bn -= NINDIRECT; // Subtract first singly-indirect block capacity
+if(bn < NINDIRECT){
+    // Second Singly-Indirect Block logic
+    if((addr = ip->addrs[NDIRECT+1]) == 0)
+        ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[bn]) == 0){ // Directly use bn, no division/modulo needed!
+        a[bn] = addr = balloc(ip->dev);
+        log_write(bp);
+    }
+    brelse(bp);
+    return addr;
+}
+
+
+Tweak 2: The Triply-Indirect Block
+
+The Trap: You are asked to implement a 3-level deep map.
+Setup: NDIRECT = 10. addrs[10] = singly, addrs[11] = doubly, addrs[12] = triply. Max blocks = $10 + 256 + 256^2 + 256^3$.
+
+// bmap() tweak for Triply-Indirect
+bn -= NDINDIRECT; // Assuming bn already had NINDIRECT subtracted
+if(bn < NDINDIRECT * NINDIRECT){ // 256^3
+    if((addr = ip->addrs[NDIRECT+2]) == 0)
+        ip->addrs[NDIRECT+2] = addr = balloc(ip->dev);
+    
+    // Level 1: Master
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    uint l1_idx = bn / NDINDIRECT;
+    if((addr = a[l1_idx]) == 0) { a[l1_idx] = addr = balloc(ip->dev); log_write(bp); }
+    brelse(bp);
+
+    // Level 2: Secondary
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    uint l2_idx = (bn % NDINDIRECT) / NINDIRECT;
+    if((addr = a[l2_idx]) == 0) { a[l2_idx] = addr = balloc(ip->dev); log_write(bp); }
+    brelse(bp);
+
+    // Level 3: Tertiary (Data)
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    uint l3_idx = bn % NINDIRECT;
+    if((addr = a[l3_idx]) == 0) { a[l3_idx] = addr = balloc(ip->dev); log_write(bp); }
+    brelse(bp);
+    return addr;
+}
+
+
+Tweak 3: No Singly-Indirect Block (Doubly Only)
+
+The Trap: The professor removes the singly-indirect block entirely to see if you rely too heavily on copy-pasting.
+Setup: NDIRECT = 12. addrs[12] is a Doubly-Indirect block.
+
+// bmap() tweak
+// NOTICE: We do NOT subtract NINDIRECT here, because there is no singly block!
+if(bn < NDINDIRECT){
+    if((addr = ip->addrs[NDIRECT]) == 0) // NDIRECT is index 12
+        ip->addrs[NDIRECT] = addr = balloc(ip->dev);
+    
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[bn / NINDIRECT]) == 0) {
+        a[bn / NINDIRECT] = addr = balloc(ip->dev);
+        log_write(bp);
+    }
+    brelse(bp);
+
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[bn % NINDIRECT]) == 0) {
+        a[bn % NINDIRECT] = addr = balloc(ip->dev);
+        log_write(bp);
+    }
+    brelse(bp);
+    return addr;
+}
+
+
+Tweak 4: Two Doubly-Indirect Blocks
+
+The Trap: To support ~128MB files, you must add a second doubly-indirect block.
+Setup: NDIRECT = 10. addrs[11] = Doubly 1, addrs[12] = Doubly 2.
+
+// bmap() tweak
+bn -= NINDIRECT;
+if(bn < NDINDIRECT * 2){
+    int doubly_index = NDIRECT + 1 + (bn / NDINDIRECT); // Chooses addrs[11] or addrs[12]
+    bn = bn % NDINDIRECT; // Normalize bn for the chosen tree
+
+    if((addr = ip->addrs[doubly_index]) == 0)
+        ip->addrs[doubly_index] = addr = balloc(ip->dev);
+    
+    // Standard doubly-indirect traversal follows...
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[bn / NINDIRECT]) == 0){
+        a[bn / NINDIRECT] = addr = balloc(ip->dev);
+        log_write(bp);
+    }
+    brelse(bp);
+    
+    // (Load secondary map and return data block as usual)
+}
+
+
+Tweak 5: Reversed Inode Layout
+
+The Trap: The indirect blocks are at the start of the array, not the end.
+Setup: addrs[0] = Doubly, addrs[1] = Singly, addrs[2] through addrs[12] = Direct.
+
+// bmap() tweak
+if(bn < NDINDIRECT){
+    // Doubly is at addrs[0]
+    if((addr = ip->addrs[0]) == 0) ip->addrs[0] = addr = balloc(ip->dev);
+    // ... proceed with doubly logic
+}
+bn -= NDINDIRECT;
+
+if(bn < NINDIRECT){
+    // Singly is at addrs[1]
+    if((addr = ip->addrs[1]) == 0) ip->addrs[1] = addr = balloc(ip->dev);
+    // ... proceed with singly logic
+}
+bn -= NINDIRECT;
+
+if(bn < NDIRECT){
+    // Direct blocks start at index 2
+    if((addr = ip->addrs[bn + 2]) == 0) ip->addrs[bn + 2] = addr = balloc(ip->dev);
+    return addr;
+}
+
+
+Tweak 6: 16-bit Pointers (Double Capacity)
+
+The Trap: The professor tells you block pointers are now ushort (16-bit) instead of uint (32-bit).
+Setup: NINDIRECT becomes 512 instead of 256. Memory casting changes.
+
+// bmap() tweak
+#define NINDIRECT_16 (BSIZE / sizeof(ushort)) // 1024 / 2 = 512
+
+bn -= NINDIRECT_16;
+if(bn < NINDIRECT_16 * NINDIRECT_16){
+    if((addr = ip->addrs[NDIRECT+1]) == 0)
+        ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
+    
+    bp = bread(ip->dev, addr);
+    ushort *a16 = (ushort*)bp->data; // MUST CAST TO ushort!
+    
+    if((addr = a16[bn / NINDIRECT_16]) == 0){
+        a16[bn / NINDIRECT_16] = addr = balloc(ip->dev);
+        log_write(bp);
+    }
+    brelse(bp);
+    // ... continue to level 2 ...
+}
+
+
+Tweak 7: Reserved Padding Slot
+
+The Trap: Slot 11 is Singly, Slot 12 is a "Reserved/Unused" flag that must remain 0, Slot 13 is Doubly.
+Setup: NDIRECT = 11. Inode has 14 total slots.
+
+// itrunc() tweak - Must skip the reserved slot when cleaning!
+for(i = 0; i < NDIRECT; i++){
+    if(ip->addrs[i]){
+        bfree(ip->dev, ip->addrs[i]);
+        ip->addrs[i] = 0;
+    }
+}
+
+if(ip->addrs[NDIRECT]){ // Singly-indirect at slot 11
+    // ... free singly blocks ...
+}
+
+// IP->ADDRS[NDIRECT+1] IS RESERVED. DO NOTHING.
+
+if(ip->addrs[NDIRECT+2]){ // Doubly-indirect is pushed to slot 13
+    // ... free doubly blocks ...
+}
+
+
+Tweak 8: Pre-allocate First Secondary Map
+
+The Trap: To optimize sequential writing, when a Master Map is allocated, you must immediately allocate its first Secondary Map.
+
+// bmap() tweak
+if((addr = ip->addrs[NDIRECT+1]) == 0){
+    ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    // TWEAK: Immediately pre-allocate index 0
+    a[0] = balloc(ip->dev);
+    log_write(bp);
+    brelse(bp);
+}
+// ... continue normal bmap traversal ...
+
+
+Tweak 9: Hard-Capped Max Blocks
+
+The Trap: Implement doubly-indirect, but enforce a strict file limit of exactly 5,000 blocks inside bmap, failing gracefully if exceeded.
+
+// bmap() tweak
+#define MAX_ARBITRARY_BLOCKS 5000
+
+// At the very top of bmap:
+if (bn >= MAX_ARBITRARY_BLOCKS) {
+    return 0; // Return 0 instead of panicking to simulate "disk full/limit reached"
+}
+
+// ... normal bmap logic ...
+
+
+Tweak 10: Early Exit itrunc Optimization
+
+The Trap: Write an optimized itrunc that stops searching the Doubly-Indirect tree as soon as it hits a 0 pointer, assuming no sparse files exist.
+
+// itrunc() tweak
+if(ip->addrs[NDIRECT+1]){
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+    for(i = 0; i < NINDIRECT; i++){
+        if(a[i] == 0) break; // TWEAK: Break early! Assumes contiguous allocation.
+        
+        struct buf *bp2 = bread(ip->dev, a[i]);
+        uint *a2 = (uint*)bp2->data;
+        for(j = 0; j < NINDIRECT; j++){
+            if(a2[j] == 0) break; // TWEAK: Break early!
+            bfree(ip->dev, a2[j]);
+        }
+        brelse(bp2);
+        bfree(ip->dev, a[i]);
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
+}
